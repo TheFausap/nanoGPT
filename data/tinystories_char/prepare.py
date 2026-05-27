@@ -59,4 +59,10 @@ meta = {
 with open(os.path.join(os.path.dirname(__file__), 'meta.pkl'), 'wb') as f:
     pickle.dump(meta, f)
 
+# length of dataset in characters: 2,196,746,461
+# all the unique characters: 
+#  !"$',-.0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
+# vocab size: 74
+# train has 1,977,071,814 tokens
+# val has 219,674,647 tokens
 

@@ -3,6 +3,11 @@
 
 ![nanoGPT](assets/nanogpt.jpg)
 
+---
+
+This is a character-level nanoGPT trained on tinystories, using a CliffordLinear layer instead of a Linear layer and a CliffordCasualSelfAttention instead of a CausalSelfAttention.
+
+The Clifford layers are from [Microsoft's CliffordLayers](https://github.com/microsoft/CliffordLayers)
 
 ---
 
@@ -20,19 +25,21 @@ Because the code is so simple, it is very easy to hack to your needs, train new 
 
 ```
 pip install torch numpy transformers datasets tiktoken wandb tqdm
+pip install "cliffordlayers @ git+https://github.com/microsoft/cliffordlayers"
 ```
 
 Dependencies:
 
 - [pytorch](https://pytorch.org) <3
 - [numpy](https://numpy.org/install/) <3
--  `transformers` for huggingface transformers <3 (to load GPT-2 checkpoints)
--  `datasets` for huggingface datasets <3 (if you want to download + preprocess OpenWebText)
--  `tiktoken` for OpenAI's fast BPE code <3
--  `wandb` for optional logging <3
--  `tqdm` for progress bars <3
+- `transformers` for huggingface transformers <3 (to load GPT-2 checkpoints)
+- `datasets` for huggingface datasets <3 (if you want to download + preprocess OpenWebText)
+- `tiktoken` for OpenAI's fast BPE code <3
+- `wandb` for optional logging <3
+- `tqdm` for progress bars <3
+- `cliffordlayers` from [Microsoft's CliffordLayers](https://github.com/microsoft/CliffordLayers)
 
-## quick start
+## quick start (shakespeare)
 
 If you are not a deep learning professional and you just want to feel the magic and get your feet wet, the fastest way to get started is to train a character-level GPT on the works of Shakespeare. First, we download it as a single (1MB) file and turn it from raw text into one large stream of integers:
 
@@ -90,6 +97,7 @@ Here, since we are running on CPU instead of GPU we must set both `--device=cpu`
 ```sh
 python sample.py --out_dir=out-shakespeare-char --device=cpu
 ```
+
 Generates samples like this:
 
 ```
@@ -129,7 +137,7 @@ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.4
 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 ```
 
-It is a good idea to benchmark your interconnect (e.g. iperf3). In particular, if you don't have Infiniband then also prepend `NCCL_IB_DISABLE=1` to the above launches. Your multinode training will work, but most likely _crawl_. By default checkpoints are periodically written to the `--out_dir`. We can sample from the model by simply `python sample.py`.
+It is a good idea to benchmark your interconnect (e.g. iperf3). In particular, if you don't have Infiniband then also prepend `NCCL_IB_DISABLE=1` to the above launches. Your multinode training will work, but most likely *crawl*. By default checkpoints are periodically written to the `--out_dir`. We can sample from the model by simply `python sample.py`.
 
 Finally, to train on a single GPU simply run the `python train.py` script. Have a look at all of its args, the script tries to be very readable, hackable and transparent. You'll most likely want to tune a number of those variables depending on your needs.
 
@@ -138,10 +146,10 @@ Finally, to train on a single GPU simply run the `python train.py` script. Have 
 OpenAI GPT-2 checkpoints allow us to get some baselines in place for openwebtext. We can get the numbers as follows:
 
 ```sh
-$ python train.py config/eval_gpt2.py
-$ python train.py config/eval_gpt2_medium.py
-$ python train.py config/eval_gpt2_large.py
-$ python train.py config/eval_gpt2_xl.py
+python train.py config/eval_gpt2.py
+python train.py config/eval_gpt2_medium.py
+python train.py config/eval_gpt2_large.py
+python train.py config/eval_gpt2_xl.py
 ```
 
 and observe the following losses on train and val:

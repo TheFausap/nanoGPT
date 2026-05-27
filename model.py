@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from cliffordlayers.nn.modules.cliffordlinear import CliffordLinear
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -91,14 +93,127 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+class CliffordCausalSelfAttention(nn.Module):
+    """
+    A Clifford-valued Causal Self-Attention Layer.
+    Utilizes Microsoft's CliffordLinear projections and calculates attention
+    scores based on the scalar part of the Clifford inner product.
+    """
+    def __init__(self, config, g=[1, 1]):
+        super().__init__()
+        # g=[1, 1] specifies a 2D Clifford algebra with 2^2 = 4 blades (1, e1, e2, e12)
+        self.g = g
+        self.n_blades = 4 
+        
+        # Group embedding dimensions into Clifford channels
+        assert config.n_embd % self.n_blades == 0, "n_embd must be divisible by the number of Clifford blades (4)"
+        self.clifford_dim = config.n_embd // self.n_blades
+        
+        assert self.clifford_dim % config.n_head == 0, "Clifford dimension must be divisible by n_head"
+        self.n_head = config.n_head
+        self.d_head = self.clifford_dim // config.n_head
+        
+        # Clifford-valued projections
+        self.q_proj = CliffordLinear(g=self.g, in_channels=self.clifford_dim, out_channels=self.clifford_dim, bias=config.bias)
+        self.k_proj = CliffordLinear(g=self.g, in_channels=self.clifford_dim, out_channels=self.clifford_dim, bias=config.bias)
+        self.v_proj = CliffordLinear(g=self.g, in_channels=self.clifford_dim, out_channels=self.clifford_dim, bias=config.bias)
+        self.out_proj = CliffordLinear(g=self.g, in_channels=self.clifford_dim, out_channels=self.clifford_dim, bias=config.bias)
+        
+        # Regularization
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        
+        # Causal mask
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                    .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, x):
+        B, T, C = x.size() # Batch, Seq_len, Real_dim (n_embd)
+
+        # 1. Reshape the flat 3D tensor into a 4D Clifford multivector tensor
+        # Shape: (B, T, clifford_dim, n_blades)
+        x_clifford = x.view(B, T, self.clifford_dim, self.n_blades)
+        
+        # 2. Flatten Batch & Seq_len because CliffordLinear expects a 3D tensor: (B_flat, Channels, Blades)
+        x_flat = x_clifford.view(B * T, self.clifford_dim, self.n_blades)
+        
+        # 3. Project Query, Key, and Value in Clifford Space
+        q = self.q_proj(x_flat).view(B, T, self.clifford_dim, self.n_blades)
+        k = self.k_proj(x_flat).view(B, T, self.clifford_dim, self.n_blades)
+        v = self.v_proj(x_flat).view(B, T, self.clifford_dim, self.n_blades)
+        
+        # 4. Split into attention heads
+        # Target shape: (B, n_head, T, d_head, n_blades)
+        q = q.view(B, T, self.n_head, self.d_head, self.n_blades).transpose(1, 2)
+        k = k.view(B, T, self.n_head, self.d_head, self.n_blades).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.d_head, self.n_blades).transpose(1, 2)
+        
+        # 5. Compute Attention Scores
+        # The dot product between two Clifford vectors is the scalar part of their geometric product.
+        # This is equivalent to a Euclidean dot product across channels (d_head) and blades (n_blades).
+        att = torch.einsum('bhtdb, bhsdb -> bhts', q, k) * (1.0 / math.sqrt(self.d_head * self.n_blades))
+        
+        # Apply causal masking
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        
+        # 6. Apply weights to Value multivectors (preserving blade correlations)
+        # Shape: (B, n_head, T, d_head, n_blades)
+        y = torch.einsum('bhts, bhsdb -> bhtdb', att, v)
+        
+        # 7. Re-assemble and project out in Clifford space
+        y = y.transpose(1, 2).contiguous().view(B * T, self.clifford_dim, self.n_blades)
+        y = self.out_proj(y)
+        y = self.resid_dropout(y)
+        
+        # 8. Unpack back to a real-valued 3D tensor for standard residual stream
+        return y.view(B, T, C)
+
+
+class CliffordMLP(nn.Module):
+    """
+    A Clifford-valued Feed-Forward Network.
+    """
+    def __init__(self, config, g=[1, 1]):
+        super().__init__()
+        self.g = g
+        self.n_blades = 4
+        self.clifford_dim = config.n_embd // self.n_blades
+        
+        self.c_fc = CliffordLinear(g=self.g, in_channels=self.clifford_dim, out_channels=4 * self.clifford_dim, bias=config.bias)
+        self.c_proj = CliffordLinear(g=self.g, in_channels=4 * self.clifford_dim, out_channels=self.clifford_dim, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+        
+    def forward(self, x):
+        B, T, C = x.size()
+        
+        # Reshape to Clifford
+        x_flat = x.view(B * T, self.clifford_dim, self.n_blades)
+        
+        # First linear layer
+        x_flat = self.c_fc(x_flat)
+        
+        # Multivector Activation:
+        # For simplicity and training stability, we apply component-wise GELU.
+        # This keeps the multivectors bounded and behaves robustly during training.
+        x_flat = F.gelu(x_flat)
+        
+        # Projection back and dropout
+        x_flat = self.c_proj(x_flat)
+        x_flat = self.dropout(x_flat)
+        
+        # Reshape back to flat real-valued representations
+        return x_flat.view(B, T, C)
+
 class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CliffordCausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.mlp = CliffordMLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
